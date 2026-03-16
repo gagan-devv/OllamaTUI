@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -10,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/gagan-devv/ollama-go/internal/client"
 	"github.com/ollama/ollama/api"
 )
 
@@ -20,25 +22,24 @@ var (
 	infoStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).MarginLeft(2)
 )
 
-// Messages
-type streamMsg string
-type errMsg error
-type doneMsg bool
-
 type Model struct {
-	viewport    viewport.Model
-	textarea    textarea.Model
-	spinner     spinner.Model
-	history     []api.Message
-	client      *api.Client
-	modelName   string
-	isThinking  bool
-	err         error
-	width       int
-	height      int
+	viewport       viewport.Model
+	textarea       textarea.Model
+	spinner        spinner.Model
+	history        []api.Message
+	client         *api.Client
+	streamHandler  *client.StreamHandler
+	modelName      string
+	isThinking     bool
+	err            error
+	width          int
+	height         int
+	streamStarted  time.Time
+	lastTokenTime  time.Time
+	partialContent string // Buffer for current streaming message
 }
 
-func InitialModel(client *api.Client, modelName, system string) Model {
+func InitialModel(apiClient *api.Client, modelName, system string) Model {
 	ta := textarea.New()
 	ta.Placeholder = "Ask me anything..."
 	ta.SetHeight(3)
@@ -52,14 +53,15 @@ func InitialModel(client *api.Client, modelName, system string) Model {
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
 	return Model{
-		textarea:  ta,
-		viewport:  vp,
-		spinner:   s,
-		client:    client,
-		modelName: modelName,
-		width:     80, // Fallback width
-		height:    24, // Fallback height
-		history:   []api.Message{{Role: "system", Content: system}},
+		textarea:      ta,
+		viewport:      vp,
+		spinner:       s,
+		client:        apiClient,
+		streamHandler: client.NewStreamHandler(apiClient, modelName),
+		modelName:     modelName,
+		width:         80, // Fallback width
+		height:        24, // Fallback height
+		history:       []api.Message{{Role: "system", Content: system}},
 	}
 }
 
@@ -99,29 +101,61 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.history = append(m.history, api.Message{Role: "user", Content: input})
 			m.textarea.Reset()
 			m.isThinking = true
+			m.streamStarted = time.Now()
+			m.partialContent = ""
 			m.updateViewport()
-			return m, m.fetchAIResponse()
+			return m, m.streamHandler.Stream(context.Background(), m.history)
 
 		case tea.KeyEsc:
 			m.textarea.Reset()
 		}
 
-	case streamMsg:
-		last := len(m.history) - 1
-		if m.history[last].Role == "assistant" {
-			m.history[last].Content += string(msg)
+	case client.StreamTokenMsg:
+		// Record token receipt time for latency tracking
+		m.lastTokenTime = time.Now()
+		
+		// Append token to partial content
+		m.partialContent += msg.Token
+		
+		// Update the last message or create new assistant message
+		if len(m.history) > 0 && m.history[len(m.history)-1].Role == "assistant" {
+			m.history[len(m.history)-1].Content = m.partialContent
 		} else {
-			m.history = append(m.history, api.Message{Role: "assistant", Content: string(msg)})
+			m.history = append(m.history, api.Message{
+				Role:    "assistant",
+				Content: m.partialContent,
+			})
 		}
-		m.updateViewport()
+		
+		// Update viewport incrementally without full redraw
+		m.updateViewportIncremental()
+		
+		// Continue listening for more tokens
+		return m, m.streamHandler.WaitForNextMsg()
 
-	case doneMsg:
+	case client.StreamDoneMsg:
+		// Stream completed successfully
 		m.isThinking = false
+		m.partialContent = ""
+		m.updateViewport()
 		return m, nil
 
-	case errMsg:
-		m.err = msg
+	case client.StreamErrorMsg:
+		// Stream failed - preserve partial content and show error
+		m.err = msg.Err
 		m.isThinking = false
+		
+		// Mark the message as incomplete if we have partial content
+		if m.partialContent != "" && len(m.history) > 0 {
+			lastIdx := len(m.history) - 1
+			if m.history[lastIdx].Role == "assistant" {
+				m.history[lastIdx].Content += "\n\n[⚠ Response interrupted]"
+			}
+		}
+		
+		m.partialContent = ""
+		m.updateViewport()
+		return m, nil
 	}
 
 	if !m.isThinking {
@@ -141,10 +175,14 @@ func (m *Model) updateViewport() {
 	)
 
 	for _, msg := range m.history {
-		if msg.Role == "system" { continue }
+		if msg.Role == "system" {
+			continue
+		}
 		label := userStyle.Render("👤 You: ")
-		if msg.Role == "assistant" { label = aiStyle.Render("🤖 AI: ") }
-		
+		if msg.Role == "assistant" {
+			label = aiStyle.Render("🤖 AI: ")
+		}
+
 		rendered, _ := renderer.Render(msg.Content)
 		sb.WriteString(label + "\n" + rendered + "\n")
 	}
@@ -152,33 +190,44 @@ func (m *Model) updateViewport() {
 	m.viewport.GotoBottom()
 }
 
+// updateViewportIncremental updates only the last message without full redraw
+func (m *Model) updateViewportIncremental() {
+	var sb strings.Builder
+	renderer, _ := glamour.NewTermRenderer(
+		glamour.WithStandardStyle("dark"),
+		glamour.WithWordWrap(m.width-5),
+	)
+
+	// Render all messages
+	for _, msg := range m.history {
+		if msg.Role == "system" {
+			continue
+		}
+		label := userStyle.Render("👤 You: ")
+		if msg.Role == "assistant" {
+			label = aiStyle.Render("🤖 AI: ")
+		}
+
+		rendered, _ := renderer.Render(msg.Content)
+		sb.WriteString(label + "\n" + rendered + "\n")
+	}
+	
+	// Set content and scroll to bottom
+	m.viewport.SetContent(sb.String())
+	m.viewport.GotoBottom()
+}
+
 func (m Model) View() string {
 	header := titleStyle.Render("Ollama TUI") + " | Model: " + m.modelName + "\n\n"
-	
+
 	var footer string
 	if m.isThinking {
 		footer = m.spinner.View() + " Thinking..."
+	} else if m.err != nil {
+		footer = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("Error: "+m.err.Error()) + "\n" + m.textarea.View()
 	} else {
 		footer = m.textarea.View()
 	}
 
 	return header + m.viewport.View() + "\n" + footer + "\n" + infoStyle.Render("Ctrl+C: Quit | Esc: Clear")
-}
-
-func (m Model) fetchAIResponse() tea.Cmd {
-	return func() tea.Msg {
-		// Note: To do true word-by-word streaming in Bubble Tea, 
-		// you usually need to pass the program handle. 
-		// For now, this collects and updates via Update loop.
-		var full strings.Builder
-		err := m.client.Chat(context.Background(), &api.ChatRequest{
-			Model:    m.modelName,
-			Messages: m.history,
-		}, func(resp api.ChatResponse) error {
-			full.WriteString(resp.Message.Content)
-			return nil
-		})
-		if err != nil { return errMsg(err) }
-		return doneMsg(true)
-	}
 }
