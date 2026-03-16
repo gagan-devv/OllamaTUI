@@ -15,8 +15,9 @@ import (
 )
 
 var (
-	model   string
-	history []api.Message
+	model        string
+	systemPrompt string
+	history      []api.Message
 )
 
 var rootCmd = &cobra.Command{
@@ -35,33 +36,46 @@ func Execute() {
 func init() {
 	// Flags
 	rootCmd.PersistentFlags().StringVarP(&model, "model", "m", "qwen3.5", "Ollama model to use")
+	rootCmd.PersistentFlags().StringVarP(&systemPrompt, "system", "s", "You are a helpful assistant.", "System instructions for the AI.")
+
 	viper.BindPFlag("model", rootCmd.PersistentFlags().Lookup("model"))
+	viper.BindPFlag("system", rootCmd.PersistentFlags().Lookup("system"))
 }
 
 func runChat(cmd *cobra.Command, args []string) {
 	client, _ := api.ClientFromEnvironment()
 	scanner := bufio.NewScanner(os.Stdin)
-	
+
 	userStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
 
 	fmt.Println("Chat Started. Type 'bye' to quit.")
 
 	for {
 		fmt.Print(userStyle.Render("👤 You: "))
-		if !scanner.Scan() { break }
+		if !scanner.Scan() {
+			break
+		}
+
+		history = append(history, api.Message{
+			Role: "system",
+			Content: viper.GetString("system"),
+		})
+
 		input := scanner.Text()
 
-		if strings.ToLower(input) == "bye" { break }
+		if strings.ToLower(input) == "bye" {
+			break
+		}
 
 		history = append(history, api.Message{Role: "user", Content: input})
-		
+
 		if len(history) > 10 {
 			history = history[len(history)-10:]
 		}
 
 		fmt.Print("\033[33m🤖 AI: \033[0m")
 		var fullResponse strings.Builder
-		
+
 		req := &api.ChatRequest{Model: model, Messages: history}
 		fn := func(resp api.ChatResponse) error {
 			fmt.Print(resp.Message.Content)
