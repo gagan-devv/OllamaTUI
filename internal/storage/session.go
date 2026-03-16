@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gagan-bhullar-tech/ollama-go/internal/session"
+	"github.com/gagan-devv/ollama-go/internal/session"
 )
 
 // SessionStorage implements session persistence to the filesystem
@@ -74,10 +74,18 @@ func (s *SessionStorage) LoadSession(id string) (*session.Session, error) {
 		return nil, fmt.Errorf("read session file: %w", err)
 	}
 
-	// Unmarshal session
+	// Unmarshal session with error handling for corrupted files
 	var sess session.Session
 	if err := json.Unmarshal(data, &sess); err != nil {
-		return nil, fmt.Errorf("unmarshal session: %w", err)
+		return nil, fmt.Errorf("corrupted session file (invalid JSON): %w", err)
+	}
+
+	// Validate essential fields
+	if sess.ID == "" {
+		return nil, fmt.Errorf("corrupted session file: missing session ID")
+	}
+	if sess.Name == "" {
+		return nil, fmt.Errorf("corrupted session file: missing session name")
 	}
 
 	return &sess, nil
