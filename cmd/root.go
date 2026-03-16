@@ -1,51 +1,81 @@
-/*
-Copyright © 2026 NAME HERE <EMAIL ADDRESS>
-
-*/
 package cmd
 
 import (
+	"bufio"
+	"context"
+	"fmt"
 	"os"
+	"strings"
 
+	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/ollama/ollama/api"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
+var (
+	model   string
+	history []api.Message
+)
 
-
-// rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "ollama-go",
-	Short: "A brief description of your application",
-	Long: `A longer description that spans multiple lines and likely contains
-examples and usage of using your application. For example:
-
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
-	// Uncomment the following line if your bare application
-	// has an action associated with it:
-	// Run: func(cmd *cobra.Command, args []string) { },
+	Use:   "chat",
+	Short: "Stateful AI Chat",
+	Run:   runChat,
 }
 
-// Execute adds all child commands to the root command and sets flags appropriately.
-// This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
-	err := rootCmd.Execute()
-	if err != nil {
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Println(err)
 		os.Exit(1)
 	}
 }
 
 func init() {
-	// Here you will define your flags and configuration settings.
-	// Cobra supports persistent flags, which, if defined here,
-	// will be global for your application.
-
-	// rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.ollama-go.yaml)")
-
-	// Cobra also supports local flags, which will only run
-	// when this action is called directly.
-	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	// Flags
+	rootCmd.PersistentFlags().StringVarP(&model, "model", "m", "qwen3.5", "Ollama model to use")
+	viper.BindPFlag("model", rootCmd.PersistentFlags().Lookup("model"))
 }
 
+func runChat(cmd *cobra.Command, args []string) {
+	client, _ := api.ClientFromEnvironment()
+	scanner := bufio.NewScanner(os.Stdin)
+	
+	userStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
 
+	fmt.Println("Chat Started. Type 'bye' to quit.")
+
+	for {
+		fmt.Print(userStyle.Render("👤 You: "))
+		if !scanner.Scan() { break }
+		input := scanner.Text()
+
+		if strings.ToLower(input) == "bye" { break }
+
+		history = append(history, api.Message{Role: "user", Content: input})
+		
+		if len(history) > 10 {
+			history = history[len(history)-10:]
+		}
+
+		fmt.Print("\033[33m🤖 AI: \033[0m")
+		var fullResponse strings.Builder
+		
+		req := &api.ChatRequest{Model: model, Messages: history}
+		fn := func(resp api.ChatResponse) error {
+			fmt.Print(resp.Message.Content)
+			fullResponse.WriteString(resp.Message.Content)
+			return nil
+		}
+
+		client.Chat(context.Background(), req, fn)
+		fmt.Println("\n---")
+
+		// Final Pretty Print of the full response using Glamour
+		rendered, _ := glamour.Render(fullResponse.String(), "dark")
+		fmt.Print(rendered)
+
+		history = append(history, api.Message{Role: "assistant", Content: fullResponse.String()})
+	}
+}
