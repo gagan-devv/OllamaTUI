@@ -12,6 +12,7 @@ chat-mac
 # --- Go Specific ---
 # Dependency folders (if using 'go mod vendor')
 vendor/
+.kiro/
 # Build caches
 .cache/
 
@@ -42,3 +43,24 @@ __pycache__/
 
 # Markdown Logs
 output.md
+
+# Test artifacts and output
+test_output/
+test_artifacts/
+**/test_output/
+**/test_artifacts/
+
+# Go test coverage and profiling files
+*.test
+*.out
+coverage.txt
+coverage.html
+*.prof
+cpu.prof
+mem.prof
+profile.out
+
+# Temporary test files
+*_test_temp/
+test_temp_*
+*.test.tmp
