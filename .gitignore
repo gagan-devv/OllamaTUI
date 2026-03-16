@@ -64,3 +64,4 @@ profile.out
 *_test_temp/
 test_temp_*
 *.test.tmp
+*test.go
