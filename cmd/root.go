@@ -38,7 +38,7 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringP("model", "m", "qwen3.5:4b", "Model name")
+	rootCmd.PersistentFlags().StringP("model", "m", "qwen3.5:cloud", "Model name")
 	rootCmd.PersistentFlags().StringP("system", "s", "You are a helpful assistant.", "System prompt")
 	viper.BindPFlag("model", rootCmd.PersistentFlags().Lookup("model"))
 	viper.BindPFlag("system", rootCmd.PersistentFlags().Lookup("system"))
