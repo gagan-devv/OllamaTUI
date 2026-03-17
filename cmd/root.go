@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/gagan-devv/ollama-go/internal/ui"
+	"github.com/gagan-devv/ollama-go/internal/config"
 )
 
 var rootCmd = &cobra.Command{
@@ -21,7 +22,31 @@ var rootCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		m := ui.InitialModel(client, viper.GetString("model"), viper.GetString("system"))
+		// Load configuration
+		configManager := config.NewConfigManager("")
+		cfg, err := configManager.Load()
+		if err != nil {
+			fmt.Printf("Warning: Could not load config, using defaults: %v\n", err)
+			cfg = config.GetDefault()
+		}
+
+		// Ensure test_output directory exists
+		if err := os.MkdirAll(cfg.Paths.TestFolder, 0755); err != nil {
+			fmt.Printf("Warning: Could not create test folder: %v\n", err)
+		}
+
+		// Use config values or command-line flags
+		modelName := viper.GetString("model")
+		if modelName == "" || modelName == "gemma3:270m" {
+			modelName = cfg.Model.Default
+		}
+		
+		systemPrompt := viper.GetString("system")
+		if systemPrompt == "You are a helpful assistant." {
+			systemPrompt = cfg.Model.SystemPrompt
+		}
+
+		m := ui.InitialModel(client, modelName, systemPrompt, cfg, configManager)
 		p := tea.NewProgram(m, tea.WithAltScreen())
 
 		if _, err := p.Run(); err != nil {
