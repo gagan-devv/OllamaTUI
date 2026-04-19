@@ -40,10 +40,10 @@ test-coverage:
 # Build release binaries for multiple platforms
 release:
 	@echo "Building release binaries..."
-	GOOS=windows GOARCH=amd64 go build -o ollama-go.exe main.go
-	GOOS=darwin GOARCH=arm64 go build -o ollama-go-mac-arm64 main.go
-	GOOS=darwin GOARCH=amd64 go build -o ollama-go-mac-amd64 main.go
-	GOOS=linux GOARCH=amd64 go build -o ollama-go-linux main.go
+	GOOS=windows GOARCH=amd64 go build -o release/ollama-go.exe main.go
+	GOOS=darwin GOARCH=arm64 go build -o release/ollama-go-mac-arm64 main.go
+	GOOS=darwin GOARCH=amd64 go build -o release/ollama-go-mac-amd64 main.go
+	GOOS=linux GOARCH=amd64 go build -o release/ollama-go-linux main.go
 
 # Help command to show available options
 help:

@@ -7,7 +7,7 @@ ollama-go
 *.dll
 *.so
 *.dylib
-chat-mac
+release/
 
 # --- Go Specific ---
 # Dependency folders (if using 'go mod vendor')
@@ -40,6 +40,7 @@ history.json
 .idea/
 .DS_Store
 __pycache__/
+.codex
 
 # Markdown Logs
 output.md

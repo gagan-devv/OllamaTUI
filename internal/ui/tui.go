@@ -17,6 +17,7 @@ import (
 	"github.com/gagan-devv/ollama-go/internal/config"
 	"github.com/gagan-devv/ollama-go/internal/ui/components"
 	"github.com/gagan-devv/ollama-go/internal/ui/theme"
+	"github.com/gagan-devv/ollama-go/internal/util"
 	"github.com/ollama/ollama/api"
 )
 
@@ -32,6 +33,8 @@ type Model struct {
 	textarea       textarea.Model
 	multilineInput *components.MultiLineInput
 	statusBar      *components.StatusBarModel
+	clipboard      *components.ClipboardModel
+	searchView     *components.SearchView
 	useMultiline   bool
 	spinner        spinner.Model
 	history        []api.Message
@@ -57,6 +60,9 @@ type Model struct {
 	showSizeWarning        bool
 	previousScrollPosition int
 	resizeInProgress       bool
+	
+	// Clipboard state
+	selectedMessageIndex int // Index of currently selected message for copying (-1 if none)
 }
 
 func InitialModel(apiClient *api.Client, modelName, system string, cfg *config.Config, configManager *config.ConfigManager) Model {
@@ -81,11 +87,20 @@ func InitialModel(apiClient *api.Client, modelName, system string, cfg *config.C
 
 	// Initialize status bar
 	statusBar := components.NewStatusBar(currentTheme, cfg.UI.ShowMetrics)
+	
+	// Initialize clipboard model
+	clipboardModel := components.NewClipboardModel()
+	
+	// Initialize search view
+	searchView := components.NewSearchView()
+	searchView.SetTheme(cfg.UI.Theme == "dark")
 
 	return Model{
 		textarea:       ta,
 		multilineInput: multilineInput,
 		statusBar:      statusBar,
+		clipboard:      clipboardModel,
+		searchView:     searchView,
 		useMultiline:   true, // Use enhanced multi-line input by default
 		viewport:       vp,
 		spinner:        s,
@@ -107,6 +122,9 @@ func InitialModel(apiClient *api.Client, modelName, system string, cfg *config.C
 		showSizeWarning:        false,
 		previousScrollPosition: 0,
 		resizeInProgress:       false,
+		
+		// Clipboard initialization
+		selectedMessageIndex: -1, // No message selected initially
 	}
 }
 
@@ -221,18 +239,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		// Handle search activation first
+		if msg.String() == "ctrl+f" && !m.searchView.IsActive() {
+			m.searchView.SetSize(m.width, m.height)
+			return m, m.searchView.Activate()
+		}
+		
+		// If search is active, let search view handle the message first
+		if m.searchView.IsActive() {
+			var searchCmd tea.Cmd
+			searchCmd = m.searchView.Update(msg)
+			return m, searchCmd
+		}
+		
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			return m, tea.Quit
 		case tea.KeyCtrlT:
 			// Toggle theme (Ctrl+T)
 			return m, m.toggleTheme()
+		case tea.KeyCtrlY:
+			// Copy last message (Ctrl+Y)
+			return m, m.copyLastMessage()
 		case tea.KeyEsc:
 			if m.useMultiline {
 				m.multilineInput.Reset()
 			} else {
 				m.textarea.Reset()
 			}
+		}
+		
+		// Handle key combinations that need string matching
+		keyStr := msg.String()
+		switch keyStr {
+		case "ctrl+shift+c":
+			// Copy full conversation history (Ctrl+Shift+C)
+			return m, m.copyFullHistory()
 		}
 		
 		// Handle Enter key for old textarea only (not multiline)
@@ -339,6 +381,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.partialContent = ""
 		m.updateViewport()
 		return m, m.statusBar.UpdateConnection(components.Disconnected)
+		
+	case components.ClipboardMsg, components.ClipboardConfirmationMsg:
+		// Handle clipboard messages
+		var clipCmd tea.Cmd
+		m.clipboard, clipCmd = m.clipboard.Update(msg)
+		return m, clipCmd
+		
+	case components.SearchViewMsg:
+		// Handle search view messages
+		switch msg.Type {
+		case components.SearchDeactivated:
+			// Search was deactivated, update viewport to clear highlights
+			m.updateViewport()
+			return m, nil
+			
+		case components.SearchUpdated:
+			// Perform search with new query
+			query := msg.Data.(string)
+			if err := m.searchView.Search(query, m.history); err != nil {
+				m.err = err
+			}
+			m.updateViewportWithSearch()
+			return m, nil
+			
+		case components.MatchChanged:
+			// Navigate to a different match
+			result := msg.Data.(*components.SearchResult)
+			m.scrollToMatch(result)
+			m.updateViewportWithSearch()
+			return m, nil
+		}
 	}
 
 	if !m.isThinking {
@@ -449,6 +522,60 @@ func (m *Model) updateViewportIncremental() {
 	m.viewport.GotoBottom()
 }
 
+// updateViewportWithSearch updates viewport content with search highlighting
+func (m *Model) updateViewportWithSearch() {
+	var sb strings.Builder
+	renderer, _ := glamour.NewTermRenderer(
+		glamour.WithStandardStyle(m.theme.GlamourStyle()),
+		glamour.WithWordWrap(m.width-5),
+	)
+
+	for i, msg := range m.history {
+		if msg.Role == "system" {
+			continue
+		}
+		label := m.theme.UserLabelStyle().Render("👤 You: ")
+		if msg.Role == "assistant" {
+			label = m.theme.AILabelStyle().Render("🤖 AI: ")
+		}
+
+		// Apply search highlighting to message content
+		content := m.searchView.HighlightMessage(msg.Content, i)
+		rendered, _ := renderer.Render(content)
+		sb.WriteString(label + "\n" + rendered + "\n")
+	}
+	
+	m.viewport.SetContent(sb.String())
+}
+
+// scrollToMatch scrolls the viewport to show a specific search match
+func (m *Model) scrollToMatch(result *components.SearchResult) {
+	if result == nil {
+		return
+	}
+	
+	// Calculate approximate line position for the message
+	// This is a simplified approach - in a real implementation,
+	// you might want to calculate exact line positions
+	messageIndex := result.MessageIndex
+	
+	// Count non-system messages before this one
+	visibleMessages := 0
+	for i := 0; i < messageIndex && i < len(m.history); i++ {
+		if m.history[i].Role != "system" {
+			visibleMessages++
+		}
+	}
+	
+	// Estimate lines per message (label + content + spacing)
+	// This is approximate and could be improved with exact line counting
+	linesPerMessage := 5 // Rough estimate
+	targetLine := visibleMessages * linesPerMessage
+	
+	// Scroll to show the match
+	m.viewport.SetYOffset(targetLine)
+}
+
 func (m Model) View() string {
 	var header string
 	
@@ -521,11 +648,11 @@ func (m Model) View() string {
 			// Adaptive help text based on width (requirement 47.4)
 			var helpText string
 			if m.width < 50 {
-				helpText = "Ctrl+C: Quit | Ctrl+T: Theme"
+				helpText = "Ctrl+C: Quit | Ctrl+T: Theme | Ctrl+Y: Copy"
 			} else if m.width < 80 {
-				helpText = "Ctrl+C: Quit | Ctrl+T: Toggle Theme | Esc: Clear"
+				helpText = "Ctrl+C: Quit | Ctrl+T: Theme | Ctrl+Y: Copy Last | Esc: Clear"
 			} else {
-				helpText = "Ctrl+C: Quit | Ctrl+T: Toggle Theme | Esc: Clear"
+				helpText = "Ctrl+C: Quit | Ctrl+T: Theme | Ctrl+Y: Copy Last | Ctrl+Shift+C: Copy All | Esc: Clear"
 			}
 			footer = m.textarea.View() + "\n" + m.theme.InfoStyle().Render(helpText)
 		}
@@ -533,9 +660,33 @@ func (m Model) View() string {
 
 	// Render status bar
 	statusBar := m.statusBar.View()
+	
+	// Render clipboard confirmation if active
+	clipboardConfirmation := m.clipboard.View()
+	if clipboardConfirmation != "" {
+		statusBar = clipboardConfirmation + " " + statusBar
+	}
 
 	// Combine all parts with proper spacing
-	return header + m.viewport.View() + "\n" + footer + "\n" + statusBar
+	mainView := header + m.viewport.View() + "\n" + footer + "\n" + statusBar
+	
+	// Overlay search view if active
+	if m.searchView.IsActive() {
+		searchOverlay := m.searchView.View()
+		if searchOverlay != "" {
+			// Position search overlay at the top of the viewport area
+			searchStyle := lipgloss.NewStyle().
+				MarginTop(strings.Count(header, "\n")).
+				MarginLeft(2)
+			
+			searchView := searchStyle.Render(searchOverlay)
+			
+			// Combine main view with search overlay
+			return lipgloss.JoinVertical(lipgloss.Left, mainView, searchView)
+		}
+	}
+	
+	return mainView
 }
 
 // toggleTheme switches between dark and light themes and persists the preference
@@ -565,6 +716,9 @@ func (m *Model) toggleTheme() tea.Cmd {
 
 	// Update status bar theme
 	m.statusBar.SetTheme(m.theme)
+	
+	// Update search view theme
+	m.searchView.SetTheme(cfg.UI.Theme == "dark")
 
 	// Save config
 	if err := m.configManager.Save(cfg); err != nil {
@@ -576,4 +730,60 @@ func (m *Model) toggleTheme() tea.Cmd {
 	m.updateViewport()
 
 	return nil
+}
+
+// copyLastMessage copies the last non-system message to the clipboard
+func (m *Model) copyLastMessage() tea.Cmd {
+	// Find the last non-system message
+	for i := len(m.history) - 1; i >= 0; i-- {
+		if m.history[i].Role != "system" {
+			content := m.history[i].Content
+			
+			// Check if this is a code block
+			codeBlocks := util.ExtractCodeBlocks(content)
+			if len(codeBlocks) > 0 {
+				// If the entire message is a single code block, strip formatting
+				if len(codeBlocks) == 1 && strings.TrimSpace(content) == strings.TrimSpace(codeBlocks[0]) {
+					stripped, err := util.CopyCodeBlock(content)
+					if err != nil {
+						return components.ShowError(err)
+					}
+					return components.ShowSuccess(fmt.Sprintf("✓ Copied code (%d chars)", len(stripped)))
+				}
+			}
+			
+			// Copy the full message content
+			if err := util.CopyMessageContent(content); err != nil {
+				return components.ShowError(err)
+			}
+			
+			return components.ShowSuccess(fmt.Sprintf("✓ Copied message (%d chars)", len(content)))
+		}
+	}
+	
+	return components.ShowError(fmt.Errorf("no message to copy"))
+}
+
+// copyFullHistory copies the entire conversation history to the clipboard
+func (m *Model) copyFullHistory() tea.Cmd {
+	var messages []string
+	
+	for _, msg := range m.history {
+		if msg.Role == "system" {
+			continue // Skip system messages
+		}
+		
+		formatted := util.FormatMessageForCopy(msg.Role, msg.Content)
+		messages = append(messages, formatted)
+	}
+	
+	if len(messages) == 0 {
+		return components.ShowError(fmt.Errorf("no messages to copy"))
+	}
+	
+	if err := util.CopyFullHistory(messages); err != nil {
+		return components.ShowError(err)
+	}
+	
+	return components.ShowSuccess(fmt.Sprintf("✓ Copied full history (%d messages)", len(messages)))
 }
