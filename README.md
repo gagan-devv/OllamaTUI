@@ -1,6 +1,6 @@
-# OllamaTUI (`ollama-go`)
+# OllamaTUI
 
-This repository builds a Go-based CLI (`ollama-go`) that provides a **terminal UI (TUI)** for chatting with an [Ollama](https://ollama.com/) instance. It’s built with [Charm](https://charm.sh/)’s Bubble Tea stack and focuses on fast streaming responses, keyboard-first navigation, and quality-of-life features like in-TUI search and clipboard copying.
+This repository builds a Go-based CLI that provides a **terminal UI (TUI)** for chatting with an [Ollama](https://ollama.com/) instance. It’s built with [Charm](https://charm.sh/)’s Bubble Tea stack and focuses on fast streaming responses, keyboard-first navigation, and quality-of-life features like in-TUI search and clipboard copying.
 
 ## Features
 
